@@ -350,20 +350,109 @@ func parseGemma4ToolCall(content string) (api.ToolCall, error) {
 }
 
 // gemma4ArgsToJSON converts Gemma 4's custom argument format to valid JSON.
+//
+// Gemma 4 uses <|"|> as string delimiters in tool call arguments. The content
+// between these delimiters can itself contain <|"|> tokens (e.g. when the model
+// quotes descriptions or outputs markup). A simple non-greedy regex fails for
+// this case because it matches the first inner <|"|> as the closing delimiter.
+//
+// Instead, we parse structurally: we find top-level key-value pairs by tracking
+// brace/bracket depth and <|"|> nesting, then convert each value appropriately.
 func gemma4ArgsToJSON(s string) string {
-	var quotedStrings []string
-	text := gemma4QuotedStringRe.ReplaceAllStringFunc(s, func(match string) string {
-		submatches := gemma4QuotedStringRe.FindStringSubmatch(match)
-		quotedStrings = append(quotedStrings, submatches[1])
-		return "\x00" + string(rune(len(quotedStrings)-1)) + "\x00"
-	})
+	const delim = "<|\"|>"
 
+	var quotedStrings []string
+	var sb strings.Builder
+
+	i := 0
+	for i < len(s) {
+		// Check for opening <|"|> delimiter
+		if i+len(delim) <= len(s) && s[i:i+len(delim)] == delim {
+			// Find the matching closing <|"|> at the top level.
+			// We need to find the LAST <|"|> before a structural boundary
+			// (comma at depth 0, closing brace/bracket at depth 0, or end of string).
+			start := i + len(delim)
+			closeIdx := findClosingDelim(s, start)
+			if closeIdx == -1 {
+				// No closing delimiter found — treat rest as the quoted string
+				quotedStrings = append(quotedStrings, s[start:])
+				sb.WriteString(gemma4Placeholder(len(quotedStrings) - 1))
+				i = len(s)
+			} else {
+				quotedStrings = append(quotedStrings, s[start:closeIdx])
+				sb.WriteString(gemma4Placeholder(len(quotedStrings) - 1))
+				i = closeIdx + len(delim)
+			}
+		} else {
+			sb.WriteByte(s[i])
+			i++
+		}
+	}
+
+	text := sb.String()
+
+	// Quote bare keys: {key: or ,key: → {"key": or ,"key":
 	text = gemma4BareKeyRe.ReplaceAllString(text, `$1"$2":`)
 
-	for i, value := range quotedStrings {
+	// Replace placeholders with JSON-escaped strings
+	for idx, value := range quotedStrings {
 		escaped, _ := json.Marshal(value)
-		text = strings.ReplaceAll(text, "\x00"+string(rune(i))+"\x00", string(escaped))
+		text = strings.ReplaceAll(text, gemma4Placeholder(idx), string(escaped))
 	}
 
 	return text
+}
+
+// gemma4Placeholder returns a unique placeholder string for the given index.
+// Uses characters from the private use area (U+E000+) to avoid collisions
+// with any content the model might generate.
+func gemma4Placeholder(i int) string {
+	return string(rune(0xE000+i)) + "\x00"
+}
+
+// findClosingDelim finds the position of the closing <|"|> delimiter that matches
+// the opening one, accounting for nested <|"|> pairs within the value.
+//
+// The strategy: scan forward for <|"|> tokens. Each <|"|> could be either:
+// (a) an inner opening delimiter (followed by content and another <|"|>)
+// (b) the closing delimiter for our value
+//
+// We identify the closing delimiter as the <|"|> that is followed by a structural
+// character: } ] , or end of string (after optional whitespace).
+func findClosingDelim(s string, start int) int {
+	const delim = "<|\"|>"
+
+	i := start
+	for i < len(s) {
+		idx := strings.Index(s[i:], delim)
+		if idx == -1 {
+			return -1
+		}
+
+		pos := i + idx
+		after := pos + len(delim)
+
+		// Check what follows this <|"|>
+		// Skip whitespace
+		j := after
+		for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
+			j++
+		}
+
+		if j >= len(s) {
+			// End of string — this is the closing delimiter
+			return pos
+		}
+
+		// If followed by a structural character (} ] ,) this is the closing delimiter
+		switch s[j] {
+		case '}', ']', ',':
+			return pos
+		}
+
+		// Otherwise this is an inner <|"|> — skip past it and continue
+		i = after
+	}
+
+	return -1
 }

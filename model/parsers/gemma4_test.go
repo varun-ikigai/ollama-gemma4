@@ -344,6 +344,21 @@ func TestGemma4Parser(t *testing.T) {
 			thinkingEnabled: false,
 		},
 		{
+			name:  "tool_call_with_nested_delimiters_in_content",
+			input: "<|tool_call>call:write{content:<|\"|># Review\n- desc: <|\"|>Generate Mermaid<|\"|>\n<|\"|>,filePath:<|\"|>/workspace/pr-review.md<|\"|>}<tool_call|>",
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "write",
+						Arguments: testArgs(map[string]any{
+							"content":  "# Review\n- desc: <|\"|>Generate Mermaid<|\"|>\n",
+							"filePath": "/workspace/pr-review.md",
+						}),
+					},
+				},
+			},
+		},
+		{
 			name:            "prefill_content_only",
 			input:           "Continuing content.",
 			expectedContent: "Continuing content.",
@@ -636,6 +651,16 @@ func TestGemma4ArgsToJSON(t *testing.T) {
 			name:     "nested_mixed_raw_and_gemma_quoted_values",
 			input:    `{meta:{title:<|"|>t "1"<|"|>,note:"n \"2\""},items:[<|"|>x "3"<|"|>,"y \"4\""]}`,
 			expected: `{"meta":{"title":"t \"1\"","note":"n \"2\""},"items":["x \"3\"","y \"4\""]}`,
+		},
+		{
+			name:     "nested_delimiters_in_content",
+			input:    "{content:<|\"|># Review\n- description: <|\"|>Generate Mermaid<|\"|>\n<|\"|>,filePath:<|\"|>/workspace/pr-review.md<|\"|>}",
+			expected: "{\"content\":\"# Review\\n- description: \\u003c|\\\"|\\u003eGenerate Mermaid\\u003c|\\\"|\\u003e\\n\",\"filePath\":\"/workspace/pr-review.md\"}",
+		},
+		{
+			name:     "multiline_markdown_with_nested_delimiters",
+			input:    "{content:<|\"|># Lightspeed Maintainer Review\n\n## Summary\nThis PR introduces a new skill.\n\n## Tag & Description Suggestions\n- Current description: <|\"|>Generate Mermaid sequence diagrams<|\"|>\n- Suggested description: <|\"|>Generate Mermaid sequence diagrams<|\"|> (No improvement needed)\n<|\"|>,filePath:<|\"|>/workspace/pr-review.md<|\"|>}",
+			expected: "{\"content\":\"# Lightspeed Maintainer Review\\n\\n## Summary\\nThis PR introduces a new skill.\\n\\n## Tag \\u0026 Description Suggestions\\n- Current description: \\u003c|\\\"|\\u003eGenerate Mermaid sequence diagrams\\u003c|\\\"|\\u003e\\n- Suggested description: \\u003c|\\\"|\\u003eGenerate Mermaid sequence diagrams\\u003c|\\\"|\\u003e (No improvement needed)\\n\",\"filePath\":\"/workspace/pr-review.md\"}",
 		},
 	}
 
